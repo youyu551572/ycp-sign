@@ -208,19 +208,42 @@ async function unlock() {
   }
 }
 
-// 自检：用内联实现签一个已知向量，和预期比对
+// 自检：确认解锁出来的种子能用（真正的验证在电脑端）
 function selfTest() {
   try {
-    var msg = 'ycpselftest';
-    var sig = nacl.sign(new TextEncoder().encode(msg), SEED);
+    var kp = keypair();
+    if (!kp || kp.secretKey.length !== 64) {
+      throw new Error('密钥派生失败');
+    }
+    var sig = nacl.sign.detached(new TextEncoder().encode('ycpselftest'),
+                                 kp.secretKey);
     var hex = '';
     for (var i = 0; i < sig.length; i++)
       hex += ('0' + sig[i].toString(16)).slice(-2);
-    console.log('[自检] Ed25519 签名 =', hex.slice(0, 32) + '…');
-    // 不在这里断言 —— 实际验证在电脑端（verify_mobile_sign.py）
+    console.log('[自检] 签名 =', hex.slice(0, 32) + '…');
     window.__YCP_SELFTEST = hex;
   } catch (e) {
     console.error('[自检] 失败', e);
+  }
+}
+
+// ⚠️ tweetnacl 的签名接口需要 **64 字节的 secretKey**，不是 32 字节种子。
+//
+// 踩过：页面里原来写的是 `nacl.sign(msg, SEED)` —— SEED 是 32 字节，
+// tweetnacl 直接抛 `bad secret key size`。
+// selfTest() 在 try/catch 里，异常被吞了只说不出话；
+// 但**生成授权码那段是同样的写法**，于是解锁能成功、
+// 点「生成授权码」却失败 —— 用户看到的就是"解锁失败"那种没头没尾的提示。
+//
+// 正确做法：先用 fromSeed 把 32 字节种子展开成 keyPair，
+// 再用 keyPair.secretKey 签名。
+function keypair() {
+  if (!SEED || SEED.length !== 32) return null;
+  try {
+    return nacl.sign.keyPair.fromSeed(SEED);
+  } catch (e) {
+    console.error('[密钥] fromSeed 失败', e);
+    return null;
   }
 }
 
@@ -351,7 +374,14 @@ document.getElementById('go').onclick = function () {
     };
 
     var msg = canonical(payload);
-    var sig = nacl.sign(new TextEncoder().encode(msg), SEED);
+    // ⚠️ 必须用 keyPair.secretKey（64 字节），不能直接传 32 字节种子 ——
+    // 见 keypair() 那边的说明。
+    var kp = keypair();
+    if (!kp) {
+      show('err', '密钥不可用，请重新解锁');
+      return;
+    }
+    var sig = nacl.sign.detached(new TextEncoder().encode(msg), kp.secretKey);
     var doc2 = { payload: payload, sig: toB64(sig) };
     batch.push({ id: licId, mid: mid, text: JSON.stringify(doc2, null, 2) });
   }
