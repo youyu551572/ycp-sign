@@ -109,13 +109,11 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;
       让对方在激活页点「复制」。24 位十六进制，例如
       <code>afad021f7a4cce9ec2052102</code>
     </div>
-    <div class="kv"></div>
-    <label>绑定方式</label>
-    <select id="bind">
-      <option value="coarse">粗绑定（只比机器码，虚拟机也能用）</option>
-      <option value="full">完整绑定（需要 machine.json）</option>
-    </select>
-    <div class="hint" id="bindHint"></div>
+    <div class="hint" style="margin-top:10px">
+      <b>粘什么都能用，自动识别：</b><br>
+      · 机器码（24 位十六进制）→ 粗绑定，虚拟机上最稳<br>
+      · machine.json（{ 开头一整段）→ 完整绑定，更严格
+    </div>
   </div>
 
   <button class="btn" id="go">生成授权码</button>
@@ -303,6 +301,37 @@ function toB64(bytes) {
   return btoa(s);
 }
 
+// 从 signals 算 machine_id —— **必须和 Python 端 machine.machine_id 一致**
+//
+// Python 那边是：
+//     parts = sorted(name for name in ("machine_guid","bios_uuid","boot_disk",
+//                                       "cpu_id","platform")
+//                    if sig.get(name, {}).get("hash"))
+//     joined = "|".join(sig[n]["hash"] for n in parts)
+//     sha256("ycpmid:" + joined).hexdigest()[:24]
+//
+// 注意两个细节：
+//   · 只取那 **5 个稳定信号**，不是全部
+//   · 按**名字排序**后拼接（不是按出现顺序）
+// SHA-256 在手机上有原生实现（crypto.subtle.digest），不用纯 JS 算 —— 快得多。
+async function midFromSignals(sig) {
+  var names = ['machine_guid', 'bios_uuid', 'boot_disk', 'cpu_id', 'platform'];
+  var parts = [];
+  for (var i = 0; i < names.length; i++) {
+    var rec = sig[names[i]];
+    if (rec && rec.hash) parts.push(rec.hash);
+  }
+  var joined = parts.join('|');
+  var buf = new TextEncoder().encode('ycpmid:' + joined);
+  var h = await crypto.subtle.digest('SHA-256', buf);
+  var arr = new Uint8Array(h);
+  var hex = '';
+  for (var j = 0; j < arr.length; j++) {
+    hex += ('0' + arr[j].toString(16)).slice(-2);
+  }
+  return hex.slice(0, 24);
+}
+
 function autoId() {
   var d = new Date();
   var y = d.getFullYear();
@@ -312,15 +341,9 @@ function autoId() {
   return 'LIC-' + y + m + dd + '-' + n;
 }
 
-document.getElementById('bind').onchange = function () {
-  var v = this.value;
-  document.getElementById('bindHint').textContent =
-    v === 'coarse'
-      ? '只比机器码。虚拟机、精简系统也能用 —— 推荐。'
-      : '需要对方回传 machine.json（比机器码更严，但虚拟机可能不够信号）。';
-};
 
-document.getElementById('go').onclick = function () {
+
+document.getElementById('go').onclick = async function () {
   if (!SEED) { alert('请先解锁'); return; }
 
   var id = document.getElementById('id').value.trim() || autoId();
@@ -328,7 +351,6 @@ document.getElementById('go').onclick = function () {
   var note = document.getElementById('note').value.trim();
   var days = parseInt(document.getElementById('days').value || '0', 10);
   var codes = document.getElementById('codes').value.trim();
-  var bindMode = document.getElementById('bind').value;
 
   if (!codes) { show('err', '请粘贴对方的机器码'); return; }
 
@@ -340,23 +362,52 @@ document.getElementById('go').onclick = function () {
     var line = lines[i].trim();
     var mid = line, signals = null;
 
-    if (bindMode === 'coarse') {
-      if (!/^[0-9a-f]{24}$/i.test(mid)) {
-        show('err', '第 ' + (i + 1) + ' 行的机器码格式不对：' + line.slice(0, 40) +
-                   '（应该是 24 位十六进制）');
-        return;
-      }
-      signals = { '_machine_id_only': { hash: mid.toLowerCase(), weight: 1 } };
-    } else {
-      // 完整绑定：期望 machine.json
+    // ── 自动识别输入是什么 ──
+    //
+    // ⚠️ 原来是"按绑定模式选解析方式"：粗绑定只认机器码、
+    // 完整绑定只认 JSON。粘错了就报「第 N 行不是合法的 machine.json」——
+    // 而用户根本不知道该粘哪种，看到这话只会更懵。
+    //
+    // 现在**不看模式**，按输入内容自动判断：
+    //   · 以 { 开头 → machine.json → 完整绑定
+    //   · 24 位十六进制 → 机器码 → 粗绑定
+    // 这样粘什么都能用，不用先选对模式。
+    var doc = null;
+    if (line.charAt(0) === '{') {
       try {
-        var doc = JSON.parse(line);
-        signals = doc.signals || doc;
-        mid = doc.machine_id || '';
+        doc = JSON.parse(line);
       } catch (e) {
-        show('err', '第 ' + (i + 1) + ' 行不是合法的 machine.json');
+        show('err', '第 ' + (i + 1) + ' 行看起来是 JSON，但解析失败：' +
+                   (e.message || e) + '（检查有没有少括号、少引号）');
         return;
       }
+    }
+
+    if (doc) {
+      // machine.json
+      signals = doc.signals || doc;
+      mid = doc.machine_id || '';
+      if (!signals || typeof signals !== 'object' ||
+          Object.keys(signals).length === 0) {
+        show('err', '第 ' + (i + 1) + ' 行的 JSON 里没有 signals 字段。' +
+                   '正确的 machine.json 形如 {"machine_id":"...","signals":{...}}');
+        return;
+      }
+      if (!mid) {
+        // machine_id 缺失就现场算一个（跟 Python 端算法一致）
+        mid = await midFromSignals(signals);
+      }
+    } else if (/^[0-9a-f]{24}$/i.test(line)) {
+      // 纯机器码 —— 粗绑定
+      mid = line.toLowerCase();
+      signals = { '_machine_id_only': { hash: mid, weight: 1 } };
+    } else {
+      show('err', '第 ' + (i + 1) + ' 行认不出是什么：' + line.slice(0, 40) +
+                 chr(10) + chr(10) +
+                 '应该粘这两种之一：' + chr(10) +
+                 '  · 机器码：24 位十六进制（激活页点「复制」拿到的）' + chr(10) +
+                 '  · machine.json：以 { 开头的一整段 JSON');
+      return;
     }
 
     var licId = lines.length > 1 ? (id + '-' + ('0' + (i + 1)).slice(-2)) : id;
