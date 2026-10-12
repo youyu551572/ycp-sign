@@ -102,7 +102,7 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;
   </div>
 
   <div class="card">
-    <label>对方的机器码</label>
+    <label>对方的机器信息</label>
     <textarea id="codes" spellcheck="false"
       placeholder="粘贴 24 位机器码&#10;一行一个可批量签发"></textarea>
     <div class="hint">
@@ -110,9 +110,12 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;
       <code>afad021f7a4cce9ec2052102</code>
     </div>
     <div class="hint" style="margin-top:10px">
-      <b>粘什么都能用，自动识别：</b><br>
-      · 机器码（24 位十六进制）→ 粗绑定，虚拟机上最稳<br>
-      · machine.json（{ 开头一整段）→ 完整绑定，更严格
+      <b>粘下面任意一种都行，自动识别：</b><br>
+      · <b>机器码</b>（24 位十六进制）—— 对方在激活页点「复制」拿到的<br>
+      · <b>machine.json</b>（一段 { 开头的 JSON）—— 对方跑
+      <code>licctl.py show --export</code> 导出的<br><br>
+      区别：机器码只认「这台机器」；machine.json 还能容忍换硬盘、
+      换主板这类小改动。有什么粘什么就行。
     </div>
   </div>
 
